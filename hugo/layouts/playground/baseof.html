@@ -327,6 +327,11 @@
           </div>
         </div>
       </div>
+      <div id="errors" class="w-full max-h-[200px] overflow-auto border-solid border border-accentRed p-2 hidden">
+        <h2 class="error-name text-white"></h2>
+        <div class="error-content w-full h-full text-white">
+        </div>
+      </div>
       {{ block "main" . }} {{ end }} {{ partial "langium-footer" . }} {{ partial
       "langium-mobile-menu" . }}
     </div>

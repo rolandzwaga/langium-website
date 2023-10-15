@@ -4,21 +4,28 @@
  * terms of the MIT License, which is available in the project root.
  ******************************************************************************/
 
+import { DefaultAstNodeLocator, createServicesForGrammar } from "langium";
+import { decompressFromEncodedURIComponent } from "lz-string";
+import { MonacoEditorLanguageClientWrapper } from "monaco-editor-wrapper/bundle";
+import { Disposable } from "vscode-languageserver";
+import { DocumentChangeResponse } from "../../assets/scripts/langium-utils/langium-ast";
+import { createUserConfig } from "../../assets/scripts/utils";
+import { render } from "./Tree";
 import {
+  DSLInitialContent,
   HelloWorldGrammar,
   LangiumMonarchContent,
-  DSLInitialContent,
 } from "./data";
 import { generateMonarch } from "./monarch-generator";
-import { decompressFromEncodedURIComponent } from 'lz-string';
-import { Disposable } from "vscode-languageserver";
-import { DefaultAstNodeLocator, createServicesForGrammar } from "langium";
-import { render } from './Tree';
-import { overlay, throttle } from "./utils";
-import { createUserConfig } from "../../assets/scripts/utils";
-export { share, overlay } from './utils'
-import { MonacoEditorLanguageClientWrapper } from "monaco-editor-wrapper/bundle";
-import { DocumentChangeResponse, LangiumAST } from "../../assets/scripts/langium-utils/langium-ast";
+import {
+  diagnostic2Text,
+  hideError,
+  overlay,
+  showError,
+  showErrorText,
+  throttle,
+} from "./utils";
+export { overlay, share } from "./utils";
 
 export interface PlaygroundParameters {
   grammar: string;
@@ -28,12 +35,12 @@ export interface PlaygroundParameters {
 /**
  * Current langium grammar in the playground
  */
-let currentGrammarContent = '';
+let currentGrammarContent = "";
 
 /**
  * Current DSL program in the playground
  */
-let currentDSLContent = '';
+let currentDSLContent = "";
 
 /**
  * DSL wrapper, allowing us to quickly access the current in-model code
@@ -52,14 +59,12 @@ const languageUpdateDelay = 150;
  */
 let nextIdCounter = 0;
 
-
 /**
  * Helper for retrieving the next language id to use, to avoid conflicting with prior ones
  */
 function nextId(): string {
   return (nextIdCounter++).toString();
 }
-
 
 /**
  * Helper to retrieve the current grammar & program in the playground.
@@ -68,14 +73,13 @@ function nextId(): string {
 export function getPlaygroundState(): PlaygroundParameters {
   return {
     grammar: currentGrammarContent,
-    content: currentDSLContent
+    content: currentDSLContent,
   };
 }
 
-
 /**
  * Starts the playground
- * 
+ *
  * @param leftEditor Left editor element
  * @param rightEditor Right editor element
  * @param encodedGrammar Encoded grammar to optionally use
@@ -96,12 +100,15 @@ export async function setupPlayground(
 
   // check to use existing grammar from URI
   if (encodedGrammar) {
-    currentGrammarContent = decompressFromEncodedURIComponent(encodedGrammar) ?? currentGrammarContent;
+    currentGrammarContent =
+      decompressFromEncodedURIComponent(encodedGrammar) ??
+      currentGrammarContent;
   }
 
   // check to use existing content from URI
   if (encodedContent) {
-    currentDSLContent = decompressFromEncodedURIComponent(encodedContent) ?? currentDSLContent;
+    currentDSLContent =
+      decompressFromEncodedURIComponent(encodedContent) ?? currentDSLContent;
   }
 
   // setup langium wrapper
@@ -110,83 +117,87 @@ export async function setupPlayground(
   // setup DSL wrapper
   await setupDSLWrapper().catch((e) => {
     // failed to setup, can happen with a bad Langium grammar, report it & discard
-    console.error('DSL editor setup error: ' + e);
-    overlay(true, true);
+    console.error("DSL editor setup error: " + e);
+    showError(e);
   });
 
   // retrieve the langium language client
   const langiumClient = langiumWrapper.getLanguageClient();
   if (!langiumClient) {
-    throw new Error('Unable to obtain language client for the Langium editor!');
+    throw new Error("Unable to obtain language client for the Langium editor!");
   }
 
   // register to receive new grammars from langium, and send them to the DSL language client
-  langiumClient.onNotification('browser/DocumentChange', (resp: DocumentChangeResponse) => {
-
-    // verify the langium client is still running, and didn't crash due to a grammar issue
-    if (!langiumClient.isRunning()) {
-      throw new Error('Langium client is not running');
-    }
-
-    // extract & update current grammar
-    currentGrammarContent = resp.content;
-
-    if (resp.diagnostics.filter(d => d.severity === 1).length) {
-      // error in the grammar, report an error & stop here
-      overlay(true, true);
-      return;
-    }
-
-    // set a new timeout for updating our DSL grammar & editor, 200ms, to avoid intermediate states
-    throttle(1, languageUpdateDelay, async () => {
-      // display 'Loading...' while we regenerate the DSL editor
-      overlay(true, false);
-
-      if (!dslWrapper) {
-        // no dsl wrapper to start (or previously crashed), setup from scratch
-        // no exception handling here, as we're 'assuming' the Langium grammar is valid at this point
-        // or we already have a wrapper that crashed (2nd case here)
-        await setupDSLWrapper();
-        overlay(false, false);
-      } else {
-        // existing wrapper, attempt to first dispose
-        await dslWrapper?.dispose().then(async () => {
-          // disposed successfully, setup & clear overlay
-          await setupDSLWrapper();
-          overlay(false, false);
-  
-        }).catch(async (e) => {
-          // failed to dispose, report & discard this error
-          // can happen when a previous editor was not started correctly
-          console.error('DSL editor disposal error: ' + e);
-          overlay(true, true);
-  
-        });
+  langiumClient.onNotification(
+    "browser/DocumentChange",
+    (resp: DocumentChangeResponse) => {
+      // verify the langium client is still running, and didn't crash due to a grammar issue
+      if (!langiumClient.isRunning()) {
+        throw new Error("Langium client is not running");
       }
-    });
-  });
+
+      // extract & update current grammar
+      currentGrammarContent = resp.content;
+
+      if (resp.diagnostics.filter((d) => d.severity === 1).length) {
+        // error in the grammar, report an error & stop here
+        overlay(false);
+        showErrorText(
+          "Diagnostic errors",
+          resp.diagnostics.map((x) => diagnostic2Text(x)).join("")
+        );
+        return;
+      }
+
+      // set a new timeout for updating our DSL grammar & editor, 200ms, to avoid intermediate states
+      throttle(1, languageUpdateDelay, async () => {
+        // display 'Loading...' while we regenerate the DSL editor
+        overlay(true);
+
+        if (!dslWrapper) {
+          // no dsl wrapper to start (or previously crashed), setup from scratch
+          // no exception handling here, as we're 'assuming' the Langium grammar is valid at this point
+          // or we already have a wrapper that crashed (2nd case here)
+          await setupDSLWrapper();
+          overlay(false);
+          hideError();
+        } else {
+          // existing wrapper, attempt to first dispose
+          await dslWrapper
+            ?.dispose()
+            .then(async () => {
+              // disposed successfully, setup & clear overlay
+              await setupDSLWrapper();
+              overlay(false);
+              hideError();
+            })
+            .catch(async (e) => {
+              // failed to dispose, report & discard this error
+              // can happen when a previous editor was not started correctly
+              console.error("DSL editor disposal error: " + e);
+              showError(e);
+            });
+        }
+      });
+    }
+  );
 
   /**
    * Helper to configure & retrieve a fresh DSL wrapper
    */
   async function setupDSLWrapper(): Promise<void> {
     // get a fresh DSL wrapper
-    dslWrapper = await getFreshDSLWrapper(rightEditor, nextId(), currentDSLContent, currentGrammarContent);
+    dslWrapper = await getFreshDSLWrapper(
+      rightEditor,
+      nextId(),
+      currentDSLContent,
+      currentGrammarContent
+    );
 
     // get a fresh client
     dslClient = dslWrapper?.getLanguageClient();
     if (!dslClient) {
-      // TODO @montymxb (Aug. 2nd, 2023) This is a hack to deal with the wrapper crashing when the LC tries to interface with
-      // an improperly configured LS (due to a bad grammar). The result is an editor that we cannot remove via 'dispose'.
-      // This should be removed once the issue is resolved in the monaco-components repo.
-
-      // Setup failed, attempt to teardown resources piece by piece, before throwing an error
-      dslWrapper?.getEditor()?.dispose();
-      dslWrapper?.disposeLanguageClient();
-      dslWrapper = undefined;
-      // clean up the UI, so the old editor is visually removed (tends to linger otherwise)
-      rightEditor.innerHTML = '';
-      throw new Error('Failed to retrieve fresh DSL LS client');
+      throw new Error("Failed to retrieve fresh DSL LS client");
     }
 
     // re-register
@@ -199,13 +210,13 @@ export async function setupPlayground(
   });
 
   // drop the overlay once done here
-  overlay(false, false);
+  overlay(false);
+  hideError();
 }
-
 
 /**
  * Starts a fresh Monaco LC wrapper
- * 
+ *
  * @param htmlElement Element to attach the editor to
  * @param languageId ID of the language to use
  * @param code Program to show in the editor
@@ -218,26 +229,35 @@ async function getFreshDSLWrapper(
   code: string,
   grammarText: string
 ): Promise<MonacoEditorLanguageClientWrapper | undefined> {
-
   // construct and set a new monarch syntax onto the editor
   const { Grammar } = await createServicesForGrammar({ grammar: grammarText });
 
   const worker = await getLSWorkerForGrammar(grammarText);
   const wrapper = new MonacoEditorLanguageClientWrapper();
-  return wrapper.start(createUserConfig({
-    htmlElement,
-    languageId,
-    code,
-    worker,
-    monarchGrammar: generateMonarch(Grammar, languageId)
-  })).then(() => {
-    return wrapper;
-  }).catch((e) => {
-    console.error('Failed to start DSL wrapper: ' + e);
-    // don't leak the worker on failure to start
-    worker.terminate();
-    return undefined;
-  });
+  return wrapper
+    .start(
+      createUserConfig({
+        htmlElement,
+        languageId,
+        code,
+        worker,
+        monarchGrammar: generateMonarch(Grammar, languageId),
+      })
+    )
+    .then(() => {
+      return wrapper;
+    })
+    .catch(async (e) => {
+      console.error("Failed to start DSL wrapper: " + e);
+      // don't leak the worker on failure to start
+      worker.terminate();
+      // try to cleanup the existing wrapper (but don't fail if we can't complete this action)
+      // particularly due to a stuck LC, which can cause this to fail part-ways through
+      try {
+        await wrapper.dispose();
+      } catch (e) {}
+      return undefined;
+    });
 }
 
 
